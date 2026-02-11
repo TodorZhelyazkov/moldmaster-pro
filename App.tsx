@@ -1,13 +1,14 @@
 
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { InjectionMold, ToolStatus, RepairLog, AppView, SparePart, SettingsTab, UserRole, AuthorizedUser } from './types';
 import { INITIAL_MOLDS, INITIAL_PARTS } from './constants';
 import ToolCard from './components/ToolCard';
 import DashboardStats from './components/DashboardStats';
 import { analyzeMoldCondition } from './services/geminiService';
+import { dbService } from './services/storageService';
 
 const App: React.FC = () => {
-  // Auth & Access state - Permanent Users as requested
+  // Auth & Access state
   const [users, setUsers] = useState<AuthorizedUser[]>([
     { id: 'u1', email: 'petar.simeonov@gotmar.com', role: UserRole.ADMIN, addedAt: '2024-05-20' },
     { id: 'u2', email: 'delyan.nedev@gotmar.com', role: UserRole.ADMIN, addedAt: '2024-05-20' },
@@ -22,8 +23,10 @@ const App: React.FC = () => {
   const [loginError, setLoginError] = useState<string | null>(null);
 
   // App Data State
-  const [molds, setMolds] = useState<InjectionMold[]>(INITIAL_MOLDS);
-  const [parts, setParts] = useState<SparePart[]>(INITIAL_PARTS);
+  const [molds, setMolds] = useState<InjectionMold[]>([]);
+  const [parts, setParts] = useState<SparePart[]>([]);
+  const [isLoadingData, setIsLoadingData] = useState(true);
+  const [isSyncing, setIsSyncing] = useState(false);
   
   // UI State
   const [activeView, setActiveView] = useState<AppView>(AppView.DASHBOARD);
@@ -48,6 +51,37 @@ const App: React.FC = () => {
   const [newRepair, setNewRepair] = useState({ description: '', technician: '', duration: 1, parts: '' });
   const [newPartData, setNewPartData] = useState({ name: '', sku: '', quantity: 0, minQuantity: 0, location: '' });
 
+  // 1. Първоначално зареждане от "базата"
+  useEffect(() => {
+    const fetchData = async () => {
+      try {
+        const data = await dbService.loadAllData();
+        setMolds(data.molds);
+        setParts(data.parts);
+        if (data.users) setUsers(data.users);
+      } catch (err) {
+        console.error("Грешка при зареждане на данните:", err);
+      } finally {
+        setIsLoadingData(false);
+      }
+    };
+    fetchData();
+  }, []);
+
+  // 2. Автоматично синхронизиране при промяна на данните
+  useEffect(() => {
+    if (!isLoadingData) {
+      const sync = async () => {
+        setIsSyncing(true);
+        await dbService.saveMolds(molds);
+        await dbService.saveParts(parts);
+        await dbService.saveUsers(users);
+        setTimeout(() => setIsSyncing(false), 800);
+      };
+      sync();
+    }
+  }, [molds, parts, users, isLoadingData]);
+
   const selectedMold = useMemo(() => molds.find(m => m.id === selectedMoldId), [molds, selectedMoldId]);
   const allRepairs = useMemo(() => molds.flatMap(m => m.repairHistory).sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()), [molds]);
   
@@ -68,7 +102,6 @@ const App: React.FC = () => {
       return;
     }
     
-    // Fixed password as requested: Gotmar123
     if (loginPassword !== 'Gotmar123') {
       setLoginError('Грешна парола.');
       return;
@@ -157,7 +190,6 @@ const App: React.FC = () => {
 
   const handleOrderPart = (id: string) => {
     setParts(prev => prev.map(p => p.id === id ? { ...p, quantity: p.quantity + 10 } : p));
-    alert('Симулирана поръчка: Добавени са 10 единици към наличността.');
   };
 
   const handleAddUser = () => {
@@ -195,7 +227,15 @@ const App: React.FC = () => {
     </button>
   );
 
-  // Login Screen View
+  if (isLoadingData) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center">
+        <div className="w-12 h-12 border-4 border-blue-600 border-t-transparent rounded-full animate-spin mb-4"></div>
+        <p className="text-slate-500 font-bold animate-pulse">Свързване с централната база данни...</p>
+      </div>
+    );
+  }
+
   if (!currentUser) {
     return (
       <div className="min-h-screen bg-[#f8fafc] flex items-center justify-center p-6 relative overflow-hidden">
@@ -239,7 +279,7 @@ const App: React.FC = () => {
               )}
               <button 
                 type="submit"
-                className="w-full bg-blue-600 text-white font-black py-4 rounded-2xl hover:bg-blue-700 transition-all shadow-xl shadow-blue-200 hover:scale-[1.02] active:scale-[0.98] mt-4"
+                className="w-full bg-blue-600 text-white font-black py-4 rounded-2xl hover:bg-blue-700 transition-all shadow-xl shadow-blue-200 mt-4"
               >
                 Вход в системата
               </button>
@@ -273,6 +313,12 @@ const App: React.FC = () => {
           </nav>
         </div>
         <div className="mt-auto p-6 border-t border-slate-100">
+          <div className="flex items-center justify-between px-2 mb-4">
+            <div className="flex items-center space-x-2">
+              <div className={`w-2 h-2 rounded-full ${isSyncing ? 'bg-amber-500 animate-pulse' : 'bg-green-500'}`}></div>
+              <span className="text-[9px] font-black text-slate-400 uppercase tracking-tighter">БД: {isSyncing ? 'Синхронизация' : 'Свързана'}</span>
+            </div>
+          </div>
           <div className="px-4 py-3 bg-slate-50 rounded-2xl border border-slate-100 mb-4">
              <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Потребител</p>
              <p className="text-xs font-bold text-slate-700 truncate">{currentUser?.email}</p>
@@ -402,11 +448,6 @@ const App: React.FC = () => {
                       </td>
                     </tr>
                   ))}
-                  {filteredMolds.length === 0 && (
-                    <tr>
-                      <td colSpan={5} className="p-10 text-center text-slate-400 italic">Няма намерени матрици по зададените критерии.</td>
-                    </tr>
-                  )}
                 </tbody>
               </table>
             </div>
@@ -415,11 +456,8 @@ const App: React.FC = () => {
 
         {activeView === AppView.REPAIRS && (
           <div className="space-y-4 animate-in slide-in-from-bottom-4">
-            <div className="flex justify-between items-center mb-4">
-               <h3 className="text-lg font-bold text-slate-800 uppercase tracking-wider text-sm">История на поддръжката</h3>
-            </div>
             {allRepairs.map(repair => (
-              <div key={repair.id} className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm flex items-start space-x-6 hover:border-blue-200 transition-colors">
+              <div key={repair.id} className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm flex items-start space-x-6">
                 <div className="w-12 h-12 bg-slate-50 rounded-xl flex items-center justify-center text-2xl shadow-inner">🛠️</div>
                 <div className="flex-1">
                   <div className="flex justify-between items-center mb-1">
@@ -454,7 +492,7 @@ const App: React.FC = () => {
                       <h4 className="font-bold text-slate-800">{part.name}</h4>
                       <p className="text-[10px] text-slate-400 font-mono tracking-tighter">{part.sku}</p>
                     </div>
-                    <span className={`px-2 py-1 rounded-lg text-xs font-black ${part.quantity <= part.minQuantity ? 'bg-red-100 text-red-600 animate-pulse border border-red-200' : 'bg-slate-100 text-slate-600 border border-slate-200'}`}>{part.quantity} бр.</span>
+                    <span className={`px-2 py-1 rounded-lg text-xs font-black ${part.quantity <= part.minQuantity ? 'bg-red-100 text-red-600 border border-red-200 animate-pulse' : 'bg-slate-100 text-slate-600 border border-slate-200'}`}>{part.quantity} бр.</span>
                   </div>
                   <div className="flex items-center justify-between text-xs pt-4 border-t border-slate-50">
                     <span className="text-slate-400">Локация: <span className="text-slate-700 font-bold">{part.location}</span></span>
@@ -476,20 +514,22 @@ const App: React.FC = () => {
               {activeSettingsTab === SettingsTab.GENERAL ? (
                 <div className="space-y-6">
                   <h3 className="text-lg font-bold text-slate-800 mb-2">Общи настройки</h3>
+                  <div className="p-4 bg-blue-50 border border-blue-100 rounded-2xl mb-4">
+                    <p className="text-xs text-blue-800 font-medium">Системата автоматично синхронизира данните с облачното съхранение при всяка промяна.</p>
+                  </div>
                   {[
-                    { title: "Автоматично архивиране", desc: "Ежедневно архивиране на данните в облака", active: true },
-                    { title: "Известия при ниски наличности", desc: "Получавай известия за резервни части под минимума", active: true },
-                    { title: "Интеграция с ERP", desc: "Синхронизиране на ударите директно от машините", active: false }
+                    { title: "Автоматично архивиране", desc: "Ежедневно архивиране на данните", active: true },
+                    { title: "Известия", desc: "За части под минимума", active: true },
+                    { title: "ERP Интеграция", desc: "Директен внос на цикли", active: false }
                   ].map((s, i) => (
                     <div key={i} className="flex items-center justify-between p-4 bg-slate-50 rounded-2xl border border-slate-100">
                       <div>
                         <p className="font-bold text-slate-700 text-sm">{s.title}</p>
                         <p className="text-xs text-slate-400">{s.desc}</p>
                       </div>
-                      <div className={`w-12 h-6 rounded-full relative cursor-pointer transition-colors ${s.active ? 'bg-blue-600' : 'bg-slate-300'}`}><div className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-all ${s.active ? 'right-1' : 'left-1'}`}></div></div>
+                      <div className={`w-12 h-6 rounded-full relative transition-colors ${s.active ? 'bg-blue-600' : 'bg-slate-300'}`}><div className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-all ${s.active ? 'right-1' : 'left-1'}`}></div></div>
                     </div>
                   ))}
-                  <button className="w-full bg-slate-900 text-white font-bold py-4 rounded-2xl hover:bg-slate-800 shadow-lg shadow-slate-200 transition-all">Запази промените</button>
                 </div>
               ) : (
                 <div className="space-y-8">
@@ -586,7 +626,7 @@ const App: React.FC = () => {
               </div>
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-1.5">
-                  <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest pl-1">Текущо количество</label>
+                  <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest pl-1">Количество</label>
                   <input type="number" value={newPartData.quantity} onChange={(e) => setNewPartData({...newPartData, quantity: Number(e.target.value)})} className="w-full p-3 bg-slate-50 border-0 rounded-2xl text-sm" />
                 </div>
                 <div className="space-y-1.5">
@@ -595,13 +635,13 @@ const App: React.FC = () => {
                 </div>
               </div>
               <div className="space-y-1.5">
-                <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest pl-1">Локация в склада</label>
+                <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest pl-1">Локация</label>
                 <input type="text" value={newPartData.location} onChange={(e) => setNewPartData({...newPartData, location: e.target.value})} placeholder="Шкаф B, Полица 3" className="w-full p-3 bg-slate-50 border-0 rounded-2xl text-sm" />
               </div>
             </div>
             <div className="mt-10 flex gap-4">
-              <button onClick={() => setShowAddPartModal(false)} className="flex-1 py-4 text-slate-500 font-bold hover:text-slate-700 transition-colors">Отказ</button>
-              <button onClick={handleAddPart} className="flex-1 bg-blue-600 text-white py-4 rounded-2xl font-black shadow-xl shadow-blue-200 hover:bg-blue-700 transition-all">Добави в инвентара</button>
+              <button onClick={() => setShowAddPartModal(false)} className="flex-1 py-4 text-slate-500 font-bold">Отказ</button>
+              <button onClick={handleAddPart} className="flex-1 bg-blue-600 text-white py-4 rounded-2xl font-black shadow-xl shadow-blue-200 hover:bg-blue-700 transition-all">Добави</button>
             </div>
           </div>
         </div>
